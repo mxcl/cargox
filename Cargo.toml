@@ -3,7 +3,7 @@ name = "cargox-cli"
 version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/pkgxdev/cargox"
-description = "Run Cargo binaries on demand, installing them via cargo-binstall when missing."
+description = "`npx` for the cargo ecosystem."
 license = "Apache-2.0"
 
 [[bin]]

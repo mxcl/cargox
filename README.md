@@ -1,10 +1,23 @@
 # `cargox`
 
 [![CI](https://github.com/mxcl/cargox/actions/workflows/ci.yml/badge.svg)](https://github.com/mxcl/cargox/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/cargox-cli.svg)](https://crates.io/crates/cargox-cli)
 
 `cargox` runs Rust binaries on demand, installing them automatically if necessary.
 It mirrors the convenience of `npx` for the Cargo ecosystem while prioritising
 `cargo-binstall` to download prebuilt executables whenever possible.
+
+## Installation
+
+We recommend installing cargo-binstall as well, this significantly speeds up
+use of `cargox`:
+
+```sh
+cargo install cargo-binstall
+cargo binstall cargox-cli
+```
+
+If you don’t want that then you can just `cargo install cargox-cli`.
 
 ## Features
 
@@ -21,21 +34,26 @@ cargox <crate[@version]> [--] [binary-args...]
 Examples:
 
 ```bash
-# Run the latest wasm-pack, installing it if necessary
-cargox bat ./README.md
+# Run the latest bat that is installed or installing the latest bat if necessary
+$ cargox bat ./README.md
+
+$ cargox bat@latest ./README.md
+# If the installed bat is old we only check for newer if you do this.
+# This is how every foo*x* tool works. We are not being different.
 
 # Install and run a pinned version
-cargox cargo-deny@0.16.3 check
+$ cargox cargo-deny@0.16.3 check
 
 # Force a reinstall, building from source instead of using cargo-binstall
-cargox --force --build-from-source cargo-nextest
+$ cargox --force --build-from-source cargo-nextest
+# ^^ shorter: cargox -fs cargo-nextest
 ```
 
 > [!TIP]
 >
 > - Arguments before the first positional are passed to `cargox`.
-> - Arguments after `--` are passed to the invoked binary.
-> - Use `--` if necessary to define the separation point.
+> - Arguments after the positional argument are passed to the invoked binary.
+> - You can use `--` if necessary to define this separation point.
 
 ### Flags
 

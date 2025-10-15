@@ -42,9 +42,7 @@ fn install_with_binstall(target: &Target, cli: &Cli, version: &Version) -> Resul
         cmd.arg("--quiet");
     }
     cmd.arg("--no-confirm");
-    if cli.force {
-        cmd.arg("--force");
-    }
+    cmd.arg("--force");
     if let Some(bin) = &cli.bin {
         cmd.arg("--bin");
         cmd.arg(bin);
