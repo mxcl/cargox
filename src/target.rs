@@ -1,29 +1,21 @@
 use anyhow::{Result, anyhow};
+use semver::VersionReq;
 
 #[derive(Debug)]
 pub struct Target {
     pub crate_name: String,
-    pub version: Option<String>,
+    pub version: VersionSpec,
     pub binary: String,
 }
 
-impl Target {
-    pub fn descriptor(&self) -> String {
-        match &self.version {
-            Some(version) => format!("{}@{}", self.crate_name, version),
-            None => self.crate_name.clone(),
-        }
-    }
-
-    pub fn install_spec(&self) -> String {
-        match &self.version {
-            Some(version) => format!("{}@{}", self.crate_name, version),
-            None => self.crate_name.clone(),
-        }
-    }
+#[derive(Debug, Clone)]
+pub enum VersionSpec {
+    Unspecified,
+    Latest,
+    Requirement(VersionReq),
 }
 
-pub fn parse_spec(spec: &str) -> Result<(String, Option<String>)> {
+pub fn parse_spec(spec: &str) -> Result<(String, VersionSpec)> {
     if spec.trim().is_empty() {
         return Err(anyhow!("crate spec cannot be empty"));
     }
@@ -40,7 +32,7 @@ pub fn parse_spec(spec: &str) -> Result<(String, Option<String>)> {
 
     let rest: Vec<&str> = parts.collect();
     if rest.is_empty() {
-        return Ok((first.to_owned(), None));
+        return Ok((first.to_owned(), VersionSpec::Unspecified));
     }
 
     if rest.len() > 1 {
@@ -56,7 +48,17 @@ pub fn parse_spec(spec: &str) -> Result<(String, Option<String>)> {
         ));
     }
 
-    Ok((first.to_owned(), Some(version.to_owned())))
+    if version.eq_ignore_ascii_case("latest") {
+        return Ok((first.to_owned(), VersionSpec::Latest));
+    }
+
+    let requirement = VersionReq::parse(version).map_err(|err| {
+        anyhow!(
+            "invalid crate spec `{spec}`: failed to parse version requirement `{version}`: {err}"
+        )
+    })?;
+
+    Ok((first.to_owned(), VersionSpec::Requirement(requirement)))
 }
 
 #[cfg(test)]
@@ -67,14 +69,19 @@ mod tests {
     fn split_spec_without_version() {
         let (name, version) = parse_spec("ripgrep").unwrap();
         assert_eq!(name, "ripgrep");
-        assert_eq!(version, None);
+        assert!(matches!(version, VersionSpec::Unspecified));
     }
 
     #[test]
-    fn split_spec_with_version() {
+    fn split_spec_with_version_requirement() {
         let (name, version) = parse_spec("ripgrep@13.0.0").unwrap();
         assert_eq!(name, "ripgrep");
-        assert_eq!(version.as_deref(), Some("13.0.0"));
+        match version {
+            VersionSpec::Requirement(req) => {
+                assert_eq!(req.to_string(), "^13.0.0");
+            }
+            other => panic!("unexpected version spec: {other:?}"),
+        }
     }
 
     #[test]
@@ -83,5 +90,12 @@ mod tests {
         assert!(parse_spec("@1.0.0").is_err());
         assert!(parse_spec("foo@").is_err());
         assert!(parse_spec("foo@bar@baz").is_err());
+    }
+
+    #[test]
+    fn split_spec_parses_latest() {
+        let (name, version) = parse_spec("ripgrep@latest").unwrap();
+        assert_eq!(name, "ripgrep");
+        assert!(matches!(version, VersionSpec::Latest));
     }
 }

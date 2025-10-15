@@ -55,24 +55,6 @@ pub fn resolve_binary_path(name: &str) -> Result<PathBuf> {
     Err(anyhow!("cannot find binary path"))
 }
 
-pub fn resolve_cargox_binary_path(name: &str) -> Result<PathBuf> {
-    for dir in candidate_bin_dirs() {
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-        #[cfg(windows)]
-        {
-            let exe_candidate = candidate.with_extension("exe");
-            if exe_candidate.exists() {
-                return Ok(exe_candidate);
-            }
-        }
-    }
-
-    Err(anyhow!("cannot find binary path in cargox install dir"))
-}
-
 fn candidate_bin_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 

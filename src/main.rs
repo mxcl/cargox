@@ -2,18 +2,29 @@ mod cli;
 mod executor;
 mod installer;
 mod paths;
+mod registry;
 mod target;
+mod versions;
 
 use std::path::PathBuf;
 use std::process::{ExitStatus, exit};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use semver::{Version, VersionReq};
 
 use cli::Cli;
 use executor::execute_binary;
 use installer::ensure_installed;
-use paths::{resolve_binary_path, resolve_cargox_binary_path};
-use target::{Target, parse_spec};
+use paths::resolve_binary_path;
+use registry::{fetch_highest_matching_version, fetch_latest_version};
+use target::{Target, VersionSpec, parse_spec};
+use versions::{find_installed_version, latest_installed, versioned_binary_path};
+
+enum RunPlan {
+    UseInstalled { path: PathBuf },
+    UseSystem { path: PathBuf },
+    InstallAndRun { version: Version },
+}
 
 fn main() {
     match run_application() {
@@ -26,11 +37,8 @@ fn run_application() -> Result<ExitStatus> {
     let cli = parse_arguments()?;
     let target = parse_target_from_cli(&cli)?;
 
-    if should_use_existing_binary(&cli, &target) {
-        return run_existing_binary(&target, &cli);
-    }
-
-    install_and_run_binary(&target, &cli)
+    let plan = resolve_run_plan(&target, &cli)?;
+    execute_plan(&plan, &target, &cli)
 }
 
 fn parse_arguments() -> Result<Cli> {
@@ -48,46 +56,73 @@ fn parse_target_from_cli(cli: &Cli) -> Result<Target> {
     })
 }
 
-fn should_use_existing_binary(cli: &Cli, target: &Target) -> bool {
+fn resolve_run_plan(target: &Target, cli: &Cli) -> Result<RunPlan> {
+    match &target.version {
+        VersionSpec::Unspecified => resolve_unspecified(target, cli),
+        VersionSpec::Latest => resolve_latest(target, cli),
+        VersionSpec::Requirement(requirement) => resolve_requirement(target, cli, requirement),
+    }
+}
+
+fn resolve_unspecified(target: &Target, cli: &Cli) -> Result<RunPlan> {
+    if !cli.force {
+        if let Some(installed) = latest_installed(&target.binary)? {
+            return Ok(RunPlan::UseInstalled {
+                path: installed.path,
+            });
+        }
+
+        if let Ok(path) = resolve_binary_path(&target.binary) {
+            return Ok(RunPlan::UseSystem { path });
+        }
+    }
+
+    let version = fetch_latest_version(&target.crate_name)?;
+    Ok(RunPlan::InstallAndRun { version })
+}
+
+fn resolve_latest(target: &Target, cli: &Cli) -> Result<RunPlan> {
+    let installed = latest_installed(&target.binary)?;
+    let remote = fetch_latest_version(&target.crate_name)?;
+
     if cli.force {
-        return false;
+        return Ok(RunPlan::InstallAndRun { version: remote });
     }
 
-    if target.version.is_some() {
-        return false;
-    }
-
-    find_existing_binary(&target.binary).is_some()
-}
-
-fn run_existing_binary(target: &Target, cli: &Cli) -> Result<ExitStatus> {
-    let binary_path = find_existing_binary(&target.binary)
-        .expect("Binary should exist when this function is called");
-    execute_binary(&binary_path, &cli.args)
-}
-
-fn install_and_run_binary(target: &Target, cli: &Cli) -> Result<ExitStatus> {
-    ensure_installed(target, cli)?;
-    let binary_path = locate_installed_binary(target)?;
-    execute_binary(&binary_path, &cli.args)
-}
-
-fn find_existing_binary(name: &str) -> Option<PathBuf> {
-    resolve_binary_path(name).ok()
-}
-
-fn locate_installed_binary(target: &Target) -> Result<PathBuf> {
-    if target.version.is_some() {
-        return resolve_cargox_binary_path(&target.binary).with_context(|| {
-            format!(
-                "{} should be available in cargox's install directory after installation",
-                target.binary
-            )
+    if let Some(installed) = installed
+        && installed.version >= remote
+    {
+        return Ok(RunPlan::UseInstalled {
+            path: installed.path,
         });
     }
 
-    resolve_binary_path(&target.binary)
-        .with_context(|| format!("{} should be on PATH after installation", target.binary))
+    Ok(RunPlan::InstallAndRun { version: remote })
+}
+
+fn resolve_requirement(target: &Target, cli: &Cli, requirement: &VersionReq) -> Result<RunPlan> {
+    if !cli.force
+        && let Some(installed) = find_installed_version(&target.binary, requirement)?
+    {
+        return Ok(RunPlan::UseInstalled {
+            path: installed.path,
+        });
+    }
+
+    let version = fetch_highest_matching_version(&target.crate_name, Some(requirement))?;
+    Ok(RunPlan::InstallAndRun { version })
+}
+
+fn execute_plan(plan: &RunPlan, target: &Target, cli: &Cli) -> Result<ExitStatus> {
+    match plan {
+        RunPlan::UseInstalled { path } => execute_binary(path, &cli.args),
+        RunPlan::UseSystem { path } => execute_binary(path, &cli.args),
+        RunPlan::InstallAndRun { version } => {
+            ensure_installed(target, cli, version)?;
+            let binary_path = versioned_binary_path(&target.binary, version)?;
+            execute_binary(&binary_path, &cli.args)
+        }
+    }
 }
 
 fn exit_with_status(status: ExitStatus) -> ! {

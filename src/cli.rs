@@ -5,7 +5,7 @@ use std::ffi::OsString;
 
 /// Run Cargo binaries on demand, installing them via `cargo-binstall` when missing.
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None, arg_required_else_help = true)]
+#[command(name = "cargox", author, version, about, long_about = None, arg_required_else_help = true)]
 pub struct Cli {
     /// Crate to run, optionally suffixed with `@version`
     #[arg(value_name = "crate[@version]")]

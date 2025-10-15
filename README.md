@@ -1,4 +1,4 @@
-# cargox
+# `cargox`
 
 [![CI](https://github.com/mxcl/cargox/actions/workflows/ci.yml/badge.svg)](https://github.com/mxcl/cargox/actions/workflows/ci.yml)
 
@@ -44,7 +44,11 @@ cargox --force --build-from-source cargo-nextest
 - `-q`, `--quiet`: suppress installer output (still prints a short status line).
 - `-s`, `--build-from-source`: build from source using `cargo install` instead of `cargo-binstall`.
 
-### Where binaries are stored
+## Versioned Installs
+
+Every binary installed by `cargox` is stored with an explicit version suffix. For example, running `cargox bat@0.24.0` produces `bin/bat-0.24.0` under the install root. When you invoke `cargox bat` without a version, the newest installed version is selected automatically. The special specifier `@latest` triggers a crates.io lookup to install and run the newest published release if a newer one exists.
+
+## Where Binaries Are Stored
 
 `cargox` operates in a **completely sandboxed environment**, isolated from your
 system's Cargo installation. This ensures that binaries installed by `cargox` are

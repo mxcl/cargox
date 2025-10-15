@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
@@ -22,6 +23,8 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for older Python
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST_DIR = ROOT / "target" / "dist"
+OPENSSL_VENDOR_ROOT = ROOT / "target" / "vendored-openssl"
+OPENSSL_BUILD_CACHE = ROOT / "target" / "openssl-build"
 
 
 def extend_path() -> None:
@@ -94,6 +97,23 @@ def ensure_tools_available() -> None:
                 f"Required command '{cmd}' is not available in PATH. "
                 "Install the missing tool and re-run the script."
             )
+
+
+def ensure_windows_cross_tooling(targets: list[str], host: str) -> None:
+    needs_windows = any(target.endswith("pc-windows-msvc") for target in targets)
+    if not needs_windows or "windows-msvc" in host:
+        return
+
+    if shutil.which("cargo-xwin"):
+        return
+
+    print("Installing cargo-xwin to enable Windows cross-compilation.")
+    run(["cargo", "install", "cargo-xwin", "--locked"])
+    if shutil.which("cargo-xwin") is None:
+        sys.exit(
+            "cargo-xwin installation did not make the tool available in PATH. "
+            "Ensure ~/.cargo/bin is on PATH and retry."
+        )
 
 
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -178,20 +198,31 @@ def detect_host_triple() -> str:
 
 
 def determine_build_command(target: str, host: str) -> list[str]:
-    if target == host:
-        return ["cargo", "build", "--release", "--target", target]
-
     if target.endswith("apple-darwin") and "apple-darwin" not in host:
         raise RuntimeError(
             f"Target {target} requires running the script on macOS. "
             "Re-run on a macOS host."
         )
 
-    if target.endswith("pc-windows-msvc") and "windows-msvc" not in host:
+    if target.endswith("pc-windows-msvc"):
+        if target == host:
+            return ["cargo", "build", "--release", "--target", target]
+        if shutil.which("cargo-xwin"):
+            return [
+                "cargo",
+                "xwin",
+                "build",
+                "--release",
+                "--target",
+                target,
+            ]
         raise RuntimeError(
-            f"Target {target} requires MSVC tooling. "
-            "Run the release script on a Windows machine with the Visual Studio Build Tools installed."
+            f"Target {target} needs MSVC tooling. "
+            "Install `cargo-xwin` for cross-compilation or run the release script on a Windows machine with the Visual Studio Build Tools installed."
         )
+
+    if target == host:
+        return ["cargo", "build", "--release", "--target", target]
 
     if target.endswith("unknown-linux-gnu") and "linux-gnu" not in host:
         if shutil.which("cargo-zigbuild"):
@@ -205,6 +236,178 @@ def determine_build_command(target: str, host: str) -> list[str]:
 
     return ["cargo", "build", "--release", "--target", target]
 
+
+def is_linux_target(target: str) -> bool:
+    return target.endswith("unknown-linux-gnu")
+
+
+@functools.lru_cache()
+def detect_openssl_sys_version() -> str:
+    lock_path = ROOT / "Cargo.lock"
+    if not lock_path.exists():
+        sys.exit(
+            "Cargo.lock is required to determine the openssl-sys version for vendoring."
+        )
+
+    try:
+        lock_data = tomllib.loads(lock_path.read_text())
+    except tomllib.TOMLDecodeError as exc:
+        sys.exit(f"Unable to parse Cargo.lock while preparing OpenSSL: {exc}")
+
+    for package in lock_data.get("package", []):
+        if package.get("name") == "openssl-sys":
+            version = package.get("version")
+            if version:
+                return version
+
+    sys.exit(
+        "Unable to determine the openssl-sys version from Cargo.lock; "
+        "ensure openssl-sys is listed and try again."
+    )
+
+
+OPENSSL_ENV_CACHE: dict[str, dict[str, str]] = {}
+
+
+def vendored_openssl_env(target: str, build_cmd: list[str]) -> dict[str, str]:
+    if not is_linux_target(target):
+        return {}
+
+    if target in OPENSSL_ENV_CACHE:
+        return OPENSSL_ENV_CACHE[target]
+
+    vendor_dir = OPENSSL_VENDOR_ROOT / target
+    openssl_version = detect_openssl_sys_version()
+    metadata_path = vendor_dir / "metadata.json"
+
+    if vendor_dir.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except FileNotFoundError:
+            metadata = {}
+        except json.JSONDecodeError as exc:
+            print(f"Warning: ignoring corrupt OpenSSL metadata for {target}: {exc}")
+            metadata = {}
+
+        if metadata.get("openssl-sys-version") != openssl_version:
+            print(
+                f"Regenerating vendored OpenSSL for {target} "
+                f"(expected openssl-sys {openssl_version}, found {metadata.get('openssl-sys-version')})."
+            )
+            shutil.rmtree(vendor_dir, ignore_errors=True)
+        else:
+            env = build_env_from_vendor(vendor_dir)
+            OPENSSL_ENV_CACHE[target] = env
+            return env
+
+    if not vendor_dir.exists():
+        build_vendored_openssl(target, build_cmd, vendor_dir, openssl_version)
+
+    env = build_env_from_vendor(vendor_dir)
+    OPENSSL_ENV_CACHE[target] = env
+    return env
+
+
+def build_env_from_vendor(vendor_dir: Path) -> dict[str, str]:
+    lib_dir = vendor_dir / "lib"
+    include_dir = vendor_dir / "include"
+
+    if not lib_dir.exists() or not include_dir.exists():
+        sys.exit(
+            f"Vendored OpenSSL appears incomplete at {vendor_dir}; "
+            "remove it and re-run the release script."
+        )
+
+    env: dict[str, str] = {
+        "OPENSSL_STATIC": "1",
+        "OPENSSL_LIB_DIR": str(lib_dir),
+        "OPENSSL_INCLUDE_DIR": str(include_dir),
+        "OPENSSL_DIR": str(vendor_dir),
+        "OPENSSL_NO_VENDOR": "1",
+        "PKG_CONFIG_ALLOW_CROSS": "1",
+    }
+
+    pkgconfig_dir = lib_dir / "pkgconfig"
+    if pkgconfig_dir.exists():
+        existing = os.environ.get("PKG_CONFIG_PATH")
+        env["PKG_CONFIG_PATH"] = (
+            f"{pkgconfig_dir}{os.pathsep}{existing}"
+            if existing
+            else str(pkgconfig_dir)
+        )
+
+    return env
+
+
+def build_vendored_openssl(
+    target: str, build_cmd: list[str], vendor_dir: Path, openssl_version: str
+) -> None:
+    print(f"Preparing vendored OpenSSL ({openssl_version}) for {target}")
+    OPENSSL_VENDOR_ROOT.mkdir(parents=True, exist_ok=True)
+    OPENSSL_BUILD_CACHE.mkdir(parents=True, exist_ok=True)
+
+    helper_toml = textwrap.dedent(
+        f"""\
+        [package]
+        name = "openssl-vendor-helper"
+        version = "0.1.0"
+        edition = "2021"
+        publish = false
+
+        [lib]
+        path = "lib.rs"
+
+        [dependencies]
+        openssl-sys = {{ version = "{openssl_version}", features = ["vendored"] }}
+        """
+    )
+
+    # Use a system temp dir so Cargo doesn't treat this helper crate as part of the workspace.
+    with TemporaryDirectory() as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        (tmp_dir / "lib.rs").write_text("pub fn _vendored_openssl_marker() {}\n")
+        (tmp_dir / "Cargo.toml").write_text(helper_toml)
+
+        helper_env = os.environ.copy()
+        helper_env.update(
+            {
+                "OPENSSL_STATIC": "1",
+                "PKG_CONFIG_ALLOW_CROSS": "1",
+                "CARGO_TARGET_DIR": str(OPENSSL_BUILD_CACHE),
+            }
+        )
+
+        run(build_cmd, cwd=tmp_dir, env=helper_env)
+
+    build_root = OPENSSL_BUILD_CACHE / target / "release" / "build"
+    install_dirs = sorted(
+        build_root.glob("openssl-sys-*/out/openssl-build/install"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+    if not install_dirs:
+        sys.exit(
+            "Unable to locate the vendored OpenSSL build artifacts. "
+            "Check the build output above for details."
+        )
+
+    install_dir = install_dirs[0]
+    temp_target = vendor_dir.with_name(f".{vendor_dir.name}.tmp")
+    if temp_target.exists():
+        shutil.rmtree(temp_target)
+    shutil.copytree(install_dir, temp_target)
+
+    metadata = {
+        "openssl-sys-version": openssl_version,
+        "generated-by": "scripts/release.py",
+        "target": target,
+    }
+    (temp_target / "metadata.json").write_text(json.dumps(metadata, indent=2))
+
+    if vendor_dir.exists():
+        shutil.rmtree(vendor_dir)
+    temp_target.rename(vendor_dir)
 
 def order_targets(targets: list[str], host: str) -> list[str]:
     def priority(target: str) -> tuple[int, str]:
@@ -222,13 +425,16 @@ def order_targets(targets: list[str], host: str) -> list[str]:
 def build_release_binaries(targets: list[str], host: str) -> tuple[list[str], list[tuple[str, str]]]:
     built: list[str] = []
     skipped: list[tuple[str, str]] = []
+    base_env = os.environ.copy()
     for target in order_targets(targets, host):
         try:
             cmd = determine_build_command(target, host)
         except RuntimeError as exc:
             skipped.append((target, str(exc)))
             continue
-        run(cmd)
+        env = base_env.copy()
+        env.update(vendored_openssl_env(target, cmd))
+        run(cmd, env=env)
         built.append(target)
     return built, skipped
 
@@ -253,12 +459,12 @@ def files_to_package(bin_names: list[str], target: str) -> list[Path]:
 
 
 def package_artifacts(
-    package_name: str, version: str, bin_names: list[str], targets: list[str]
+    artifact_prefix: str, version: str, bin_names: list[str], targets: list[str]
 ) -> list[Path]:
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     artifacts: list[Path] = []
     for target in targets:
-        archive_base = f"{package_name}-{version}-{target}"
+        archive_base = f"{artifact_prefix}-{version}-{target}"
         archive_path: Path
         files = files_to_package(bin_names, target)
 
@@ -315,6 +521,12 @@ def main() -> None:
     manifest = read_manifest()
     package = manifest["package"]
     package_name = package["name"]
+    package_metadata = package.get("metadata") or {}
+    dist_metadata = package_metadata.get("dist") if isinstance(package_metadata, dict) else {}
+    if not isinstance(dist_metadata, dict):
+        dist_metadata = {}
+    release_name = dist_metadata.get("release_name", package_name)
+    artifact_prefix = dist_metadata.get("artifact_prefix", release_name)
     version = package["version"]
     tag = f"v{version}"
 
@@ -322,14 +534,15 @@ def main() -> None:
     bin_names = collect_binaries(manifest)
 
     commit = current_commit()
-    ensure_draft_release(tag, f"{package_name} {version}", commit)
+    ensure_draft_release(tag, f"{release_name} {version}", commit)
     ensure_rust_targets(targets)
     host = detect_host_triple()
+    ensure_windows_cross_tooling(targets, host)
     built_targets, skipped_targets = build_release_binaries(targets, host)
     if not built_targets:
         sys.exit("No targets were built. Resolve the issues above and retry.")
 
-    artifacts = package_artifacts(package_name, version, bin_names, built_targets)
+    artifacts = package_artifacts(artifact_prefix, version, bin_names, built_targets)
     upload_artifacts(tag, artifacts)
     open_release_in_browser(tag)
 

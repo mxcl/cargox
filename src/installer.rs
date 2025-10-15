@@ -1,35 +1,40 @@
 use anyhow::{Context, Result, anyhow};
+use semver::Version;
+use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use crate::cli::Cli;
 use crate::paths::get_install_dir;
 use crate::target::Target;
+use crate::versions::versioned_binary_path;
 
-pub fn ensure_installed(target: &Target, cli: &Cli) -> Result<()> {
+pub fn ensure_installed(target: &Target, cli: &Cli, version: &Version) -> Result<()> {
     if !cli.build_from_source && which::which("cargo-binstall").is_ok() {
-        install_with_binstall(target, cli)
+        install_with_binstall(target, cli, version)
     } else {
-        log_fallback_reason(cli, target);
-        install_with_cargo(target, cli)
+        log_fallback_reason(cli, target, version);
+        install_with_cargo(target, cli, version)
     }
 }
 
-fn log_fallback_reason(cli: &Cli, target: &Target) {
+fn log_fallback_reason(cli: &Cli, target: &Target, version: &Version) {
     if cli.build_from_source {
         eprintln!(
-            "Building {} from source with cargo install",
-            target.descriptor()
+            "Building {}@{} from source with cargo install",
+            target.crate_name, version
         );
     } else {
         eprintln!(
-            "cargo-binstall not found; falling back to cargo install for {}",
-            target.descriptor()
+            "cargo-binstall not found; falling back to cargo install for {}@{}",
+            target.crate_name, version
         );
     }
 }
 
-fn install_with_binstall(target: &Target, cli: &Cli) -> Result<()> {
+fn install_with_binstall(target: &Target, cli: &Cli, version: &Version) -> Result<()> {
     let install_dir = get_install_dir()?;
+    ensure_bin_dir(&install_dir)?;
 
     let mut cmd = Command::new("cargo");
     cmd.arg("binstall");
@@ -44,22 +49,23 @@ fn install_with_binstall(target: &Target, cli: &Cli) -> Result<()> {
         cmd.arg("--bin");
         cmd.arg(bin);
     }
-    cmd.arg(target.install_spec());
+    cmd.arg(format!("{}@{}", target.crate_name, version));
 
     // Set the install root for cargo-binstall and remove any environment variables
     // that could leak into the installation process
     sanitize_cargo_env(&mut cmd, &install_dir);
 
     eprintln!(
-        "Installing {} with cargo-binstall{} to {}",
-        target.descriptor(),
+        "Installing {}@{} with cargo-binstall{} to {}",
+        target.crate_name,
+        version,
         if cli.quiet { " (quiet)" } else { "" },
         install_dir.display()
     );
 
     let status = cmd.status().context("failed to invoke cargo-binstall")?;
     if status.success() {
-        Ok(())
+        finalize_installation(&install_dir, &target.binary, version)
     } else {
         Err(anyhow!(
             "cargo-binstall exited with status code {}",
@@ -71,8 +77,9 @@ fn install_with_binstall(target: &Target, cli: &Cli) -> Result<()> {
     }
 }
 
-fn install_with_cargo(target: &Target, cli: &Cli) -> Result<()> {
+fn install_with_cargo(target: &Target, cli: &Cli, version: &Version) -> Result<()> {
     let install_dir = get_install_dir()?;
+    ensure_bin_dir(&install_dir)?;
 
     // Create a temporary directory for the build
     let temp_dir = tempfile::tempdir().context("failed to create temp directory")?;
@@ -88,10 +95,8 @@ fn install_with_cargo(target: &Target, cli: &Cli) -> Result<()> {
     cmd.arg("--root");
     cmd.arg(&install_dir);
     cmd.arg(&target.crate_name);
-    if let Some(version) = &target.version {
-        cmd.arg("--version");
-        cmd.arg(version);
-    }
+    cmd.arg("--version");
+    cmd.arg(version.to_string());
     if let Some(bin) = &cli.bin {
         cmd.arg("--bin");
         cmd.arg(bin);
@@ -102,8 +107,9 @@ fn install_with_cargo(target: &Target, cli: &Cli) -> Result<()> {
     sanitize_cargo_env(&mut cmd, &install_dir);
 
     eprintln!(
-        "Installing {} with cargo install{} to {}",
-        target.descriptor(),
+        "Installing {}@{} with cargo install{} to {}",
+        target.crate_name,
+        version,
         if cli.quiet { " (quiet)" } else { "" },
         install_dir.display()
     );
@@ -113,7 +119,7 @@ fn install_with_cargo(target: &Target, cli: &Cli) -> Result<()> {
     // Temp directory will be automatically cleaned up when temp_dir goes out of scope
 
     if status.success() {
-        Ok(())
+        finalize_installation(&install_dir, &target.binary, version)
     } else {
         Err(anyhow!(
             "cargo install exited with status code {}",
@@ -146,6 +152,61 @@ fn sanitize_cargo_env(cmd: &mut Command, install_dir: &std::path::Path) {
 
     // Set only our controlled install location
     cmd.env("CARGO_INSTALL_ROOT", install_dir);
+}
+
+fn finalize_installation(install_dir: &Path, binary: &str, version: &Version) -> Result<()> {
+    let bin_dir = install_dir.join("bin");
+    let installed_path = {
+        let candidate = bin_dir.join(binary);
+        if candidate.exists() {
+            candidate
+        } else {
+            #[cfg(windows)]
+            {
+                let exe_candidate = bin_dir.join(binary).with_extension("exe");
+                if exe_candidate.exists() {
+                    exe_candidate
+                } else {
+                    return Err(anyhow!(
+                        "expected installer to create {}, but it was not found",
+                        candidate.display()
+                    ));
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(anyhow!(
+                    "expected installer to create {}, but it was not found",
+                    candidate.display()
+                ));
+            }
+        }
+    };
+
+    let target_path = versioned_binary_path(binary, version)?;
+    if target_path.exists() {
+        fs::remove_file(&target_path).with_context(|| {
+            format!(
+                "failed to replace existing installation {}",
+                target_path.display()
+            )
+        })?;
+    }
+
+    fs::rename(&installed_path, &target_path).with_context(|| {
+        format!(
+            "failed to move installed binary from {} to {}",
+            installed_path.display(),
+            target_path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn ensure_bin_dir(install_dir: &Path) -> Result<()> {
+    let bin_dir = install_dir.join("bin");
+    fs::create_dir_all(&bin_dir).with_context(|| format!("failed to create {}", bin_dir.display()))
 }
 
 #[cfg(test)]
