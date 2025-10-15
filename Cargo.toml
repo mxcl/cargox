@@ -2,7 +2,7 @@
 name = "cargox-cli"
 version = "0.1.0"
 edition = "2024"
-repository = "https://github.com/mxcl/cargox"
+repository = "https://github.com/pkgxdev/cargox"
 description = "Run Cargo binaries on demand, installing them via cargo-binstall when missing."
 license = "Apache-2.0"
 
@@ -11,7 +11,7 @@ name = "cargox"
 path = "src/main.rs"
 
 [package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
+pkg-url = "{ repo }/releases/download/v{ version }/cargox-{ version }-{ target }.tar.gz"
 pkg-fmt = "tgz"
 bin-dir = "{ bin }{ binary-ext }"
 
@@ -19,7 +19,7 @@ bin-dir = "{ bin }{ binary-ext }"
 release_name = "cargox"
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.zip"
+pkg-url = "{ repo }/releases/download/v{ version }/cargox-{ version }-{ target }.zip"
 pkg-fmt = "zip"
 
 [dependencies]
